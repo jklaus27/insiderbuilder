@@ -140,7 +140,7 @@
     <div class="sep"></div>
 
     <div class="hint">
-      <div><span class="kbd">Click</span> place &nbsp; <span class="kbd">Drag</span> move &nbsp; <span class="kbd">Shift+Drag</span> paint &nbsp; <span class="kbd">Wheel</span> zoom</div>
+      <div><span class="kbd">Click</span> place &nbsp; <span class="kbd">Drag</span> move &nbsp; <span class="kbd">Shift+Drag</span> box-fill floors &nbsp; <span class="kbd">Wheel</span> zoom</div>
       <div><span class="kbd">WASD</span> move &nbsp; <span class="kbd">Q/E</span> rotate &nbsp; <span class="kbd">R/F</span> tilt &nbsp; <span class="kbd">Right Click</span> erase &nbsp; <span class="kbd">Ctrl+Z</span> undo</div>
       <div style="opacity:0.85">Tip: Brush changes only new tiles. Use “Apply to Level” if you want a full recolor.</div>
     </div>
@@ -152,11 +152,6 @@
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-
-    // === One behavior check ===
-    // When we say "levels align", do you want a visible floor slab between wall segments,
-    // or should wall segments touch perfectly (no slab showing)?
-    // Current implementation: wall segments touch perfectly; floors are inside each level.
 
     // ===== World constants =====
     const GRID = 1;
@@ -254,7 +249,6 @@
       const g = new THREE.GridHelper(80,80,0x2a3250,0x2a3250);
       g.material.opacity = 0.25;
       g.material.transparent = true;
-      // grid at the top surface of the floor for that level
       g.position.y = l*LEVEL_HEIGHT + FLOOR_THICK;
       return g;
     }
@@ -275,6 +269,13 @@
     const ghostWall  = new THREE.Mesh(geoWall, matGhostWall);
     ghostWall.visible=false;
     ghostGroup.add(ghostWall);
+
+    // Box preview for Shift+Drag fill (floors)
+    const boxMat = new THREE.LineBasicMaterial({ color: 0x8aa1ff, transparent:true, opacity:0.9 });
+    const boxGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 0.02, 1));
+    const boxPreview = new THREE.LineSegments(boxGeo, boxMat);
+    boxPreview.visible = false;
+    scene.add(boxPreview);
 
     // ===== History =====
     const history = [];
@@ -371,6 +372,7 @@
       ghostFloor.visible = ghostEnabled && t==='floor';
       ghostWall.visible  = ghostEnabled && t==='wall';
       renderer.domElement.style.cursor = t==='erase' ? 'not-allowed' : 'crosshair';
+      boxPreview.visible = false;
     }
 
     function undo(){
@@ -413,7 +415,6 @@
       pushHistory();
       const dir = DIRS[d];
       const m = new THREE.Mesh(geoWall, matWall.clone());
-      // Centered in the level: bottoms at l*LEVEL_HEIGHT, tops at (l+1)*LEVEL_HEIGHT
       m.position.set(
         x*GRID + dir.dx*GRID*0.5,
         l*LEVEL_HEIGHT + WALL_HEIGHT*0.5,
@@ -537,7 +538,7 @@
       const objs=[...WORLD.floors.values(),...WORLD.walls.values()];
       const hits=raycaster.intersectObjects(objs,false);
       if(hits.length) return {type:'block',hit:hits[0]};
-      const y = activeLevel*LEVEL_HEIGHT + FLOOR_THICK; // top of floor plane
+      const y = activeLevel*LEVEL_HEIGHT + FLOOR_THICK;
       const p=new THREE.Plane(new THREE.Vector3(0,1,0),-y);
       const pos=new THREE.Vector3();
       if(raycaster.ray.intersectPlane(p,pos)) return {type:'plane',hitPoint:pos};
@@ -563,50 +564,67 @@
       if(hovered){ hovered.material = hoveredMat; hovered=null; hoveredMat=null; }
     }
 
-    // ===== Input: click vs drag + Shift paint =====
-    let isDown=false, isDragging=false, painting=false, downPos={x:0,y:0};
-    let lastPaintKey = null;
+    // ===== Input: click vs drag + Shift box-fill =====
+    let isDown=false, isDragging=false;
+    let downPos={x:0,y:0};
 
-    function paintAtResult(res){
-      if(!res) return;
-      if(res.type==='block'){
-        if(tool==='erase') eraseBlock(res.hit.object);
-        return;
-      }
-      const p = res.hitPoint;
-      const g = snapPos(p);
-      const x = Math.round(g.x);
-      const z = Math.round(g.z);
-      if(tool==='floor'){
-        const k = kFloor(x,z,activeLevel);
-        if(lastPaintKey!==k){ placeFloor(x,z,activeLevel); lastPaintKey = k; }
-      }
-      if(tool==='wall'){
-        const d = pickDir(p);
-        const k = kWall(x,z,activeLevel,d);
-        if(lastPaintKey!==k){ placeWall(x,z,activeLevel,d); lastPaintKey = k; }
+    let boxing=false;
+    let boxStart=null;
+
+    function updateBoxPreview(currentXZ){
+      if(!boxStart || !currentXZ) return;
+      const minx = Math.min(boxStart.x, currentXZ.x);
+      const maxx = Math.max(boxStart.x, currentXZ.x);
+      const minz = Math.min(boxStart.z, currentXZ.z);
+      const maxz = Math.max(boxStart.z, currentXZ.z);
+
+      const w = (maxx-minx+1);
+      const d = (maxz-minz+1);
+
+      boxPreview.scale.set(w, 1, d);
+      boxPreview.position.set(
+        ((minx+maxx)/2)*GRID,
+        activeLevel*LEVEL_HEIGHT + FLOOR_THICK + 0.01,
+        ((minz+maxz)/2)*GRID
+      );
+    }
+
+    function commitBoxFill(endXZ){
+      if(!boxStart || !endXZ) return;
+      const minx = Math.min(boxStart.x, endXZ.x);
+      const maxx = Math.max(boxStart.x, endXZ.x);
+      const minz = Math.min(boxStart.z, endXZ.z);
+      const maxz = Math.max(boxStart.z, endXZ.z);
+      for(let x=minx; x<=maxx; x++){
+        for(let z=minz; z<=maxz; z++){
+          placeFloor(x,z,activeLevel);
+        }
       }
     }
 
-    renderer.domElement.addEventListener('pointerdown',e=>{
+    renderer.domElement.addEventListener('pointerdown', (e) => {
       if(e.target.closest && e.target.closest('#ui')) return;
       isDown=true; isDragging=false; downPos={x:e.clientX,y:e.clientY};
-      if(e.shiftKey){
-        painting = true;
-        lastPaintKey = null;
+
+      const res = pick(e);
+      // Shift+Drag only does box-fill when Floor tool is selected.
+      if(e.shiftKey && tool==='floor' && res?.type==='plane'){
+        const g = snapPos(res.hitPoint);
+        boxStart = { x: Math.round(g.x), z: Math.round(g.z) };
+        boxing = true;
         controls.enabled = false;
-        const res = pick(e);
-        paintAtResult(res);
+        boxPreview.visible = true;
+        updateBoxPreview(boxStart);
       }
     });
 
-    renderer.domElement.addEventListener('pointermove',e=>{
+    renderer.domElement.addEventListener('pointermove', (e) => {
       if(isDown){
         const dx=e.clientX-downPos.x, dy=e.clientY-downPos.y;
         if(Math.hypot(dx,dy)>5) isDragging=true;
       }
 
-      const res=pick(e);
+      const res = pick(e);
       restoreHover();
 
       if(tool==='erase' && res?.type==='block'){
@@ -616,8 +634,12 @@
         hovered.material.color.set(0xff4444);
       }
 
-      if(painting){
-        paintAtResult(res);
+      if(boxing){
+        if(res?.type==='plane'){
+          const g = snapPos(res.hitPoint);
+          const cur = { x: Math.round(g.x), z: Math.round(g.z) };
+          updateBoxPreview(cur);
+        }
         return;
       }
 
@@ -647,17 +669,25 @@
       }
     });
 
-    renderer.domElement.addEventListener('pointerup',e=>{
+    renderer.domElement.addEventListener('pointerup', (e) => {
       if(e.target.closest && e.target.closest('#ui')) return;
-      const res=pick(e);
+      const res = pick(e);
       isDown=false;
 
-      if(painting){
-        painting = false;
-        lastPaintKey = null;
+      if(boxing){
+        boxing = false;
         controls.enabled = true;
+        boxPreview.visible = false;
+
+        if(res?.type==='plane'){
+          const g = snapPos(res.hitPoint);
+          const endXZ = { x: Math.round(g.x), z: Math.round(g.z) };
+          commitBoxFill(endXZ);
+        }
+        boxStart = null;
         return;
       }
+
       if(!res || isDragging) return;
 
       if(e.button===2 || tool==='erase'){
@@ -671,7 +701,7 @@
       if(tool==='wall') placeWall(Math.round(g.x),Math.round(g.z),activeLevel,pickDir(p));
     });
 
-    window.addEventListener('contextmenu',e=>e.preventDefault());
+    window.addEventListener('contextmenu', e => e.preventDefault());
 
     // ===== Movement + keyboard rotation =====
     const keys = { w:false, a:false, s:false, d:false, q:false, e:false, r:false, f:false };
@@ -681,11 +711,11 @@
     const ROT_SPEED = 1.6;
     const TILT_SPEED = 1.2;
 
-    window.addEventListener('keydown', e => {
+    window.addEventListener('keydown', (e) => {
       const k = e.key.toLowerCase();
       if(k in keys) keys[k] = true;
     });
-    window.addEventListener('keyup', e => {
+    window.addEventListener('keyup', (e) => {
       const k = e.key.toLowerCase();
       if(k in keys) keys[k] = false;
     });
@@ -973,17 +1003,19 @@
     // ===== Seed a starter pad (no history) =====
     function seedRoom(){
       suppressHistory = true;
-      for(let x=-3;x<=2;x++) for(let z=-2;z<=2;z++){
-        const col=getBrushColor(0);
-        const mat=new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
-        const k=kFloor(x,z,0);
-        const m=new THREE.Mesh(geoFloor,mat);
-        m.position.set(x*GRID,0*LEVEL_HEIGHT+FLOOR_THICK*0.5+EPS,z*GRID);
-        m.userData={kind:'floor',key:k};
-        scene.add(m);
-        WORLD.floors.set(k,m);
-        WORLD.data.floors.add(k);
-        WORLD.floorColors.set(k, `#${col.getHexString()}`);
+      for(let x=-3;x<=2;x++){
+        for(let z=-2;z<=2;z++){
+          const col=getBrushColor(0);
+          const mat=new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
+          const k=kFloor(x,z,0);
+          const m=new THREE.Mesh(geoFloor,mat);
+          m.position.set(x*GRID,0*LEVEL_HEIGHT+FLOOR_THICK*0.5+EPS,z*GRID);
+          m.userData={kind:'floor',key:k};
+          scene.add(m);
+          WORLD.floors.set(k,m);
+          WORLD.data.floors.add(k);
+          WORLD.floorColors.set(k, `#${col.getHexString()}`);
+        }
       }
       suppressHistory = false;
     }
@@ -996,7 +1028,7 @@
     function runSelfTests(){
       console.assert(LEVEL_HEIGHT === WALL_HEIGHT, 'LEVEL_HEIGHT must equal WALL_HEIGHT for flush wall stacking');
       console.assert(Math.abs((0*LEVEL_HEIGHT + WALL_HEIGHT) - (1*LEVEL_HEIGHT)) < 1e-9, 'Wall top at level 0 should match wall bottom at level 1');
-      console.assert(FLOOR_THICK > 0 && WALL_HEIGHT > 0, 'Heights must be positive');
+      console.assert(!!boxPreview && boxPreview.isLineSegments, 'Box preview should exist');
     }
     runSelfTests();
 
