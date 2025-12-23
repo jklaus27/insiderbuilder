@@ -33,6 +33,8 @@
     .btn:hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.18); }
     .btn:active { transform: translateY(1px); }
     .btn.active { background: rgba(120, 140, 255, 0.22); border-color: rgba(120, 140, 255, 0.55); }
+    .btn[disabled]{opacity:0.45;cursor:not-allowed}
+
     .chip {
       padding: 6px 10px; border-radius: 999px;
       border: 1px solid rgba(255,255,255,0.12);
@@ -79,6 +81,7 @@
     #showUI {
       position: fixed; left: 12px; top: 12px; display: none; z-index: 11;
     }
+
     .modalOverlay{display:none;position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:20;align-items:center;justify-content:center;}
     .modalCard{background:rgba(15,18,28,0.95);border:1px solid rgba(255,255,255,0.15);border-radius:16px;padding:16px;width:min(420px,92vw);max-height:70vh;display:flex;flex-direction:column;color:#e8ecff;box-shadow:0 20px 60px rgba(0,0,0,0.55);}
     .modalTitle{margin:0 0 6px;font-size:16px;}
@@ -91,9 +94,7 @@
     .saveItem:hover{background:rgba(255,255,255,0.08)}
     .saveItem.active{background:rgba(120,140,255,0.25);border-color:rgba(120,140,255,0.6)}
     .saveMeta{font-size:11px;opacity:0.7}
-    .btn[disabled]{opacity:0.45;cursor:not-allowed}
     .selectedLine{font-size:12px;opacity:0.85;margin:0 0 10px}
-
   </style>
 
   <script type="importmap">
@@ -152,12 +153,23 @@
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+    // === One behavior check ===
+    // When we say "levels align", do you want a visible floor slab between wall segments,
+    // or should wall segments touch perfectly (no slab showing)?
+    // Current implementation: wall segments touch perfectly; floors are inside each level.
+
     // ===== World constants =====
     const GRID = 1;
-    const LEVEL_HEIGHT = 3;
     const WALL_HEIGHT = 2.6;
     const WALL_THICK = 0.18;
     const FLOOR_THICK = 0.12;
+
+    // Levels stack so walls touch perfectly: wall top at (L+1)*LEVEL_HEIGHT
+    // Floors live inside the level volume and do not change stacking.
+    const LEVEL_HEIGHT = WALL_HEIGHT;
+
+    // A tiny epsilon to avoid z-fighting when floor and wall share planes
+    const EPS = 0.0005;
 
     // ===== Data =====
     const WORLD = {
@@ -211,7 +223,7 @@
     const geoFloor = new THREE.BoxGeometry(GRID, FLOOR_THICK, GRID);
     const geoWall  = new THREE.BoxGeometry(GRID, WALL_HEIGHT, WALL_THICK);
 
-    // ===== Brush (defaults per level, but editing is per-tile going forward) =====
+    // ===== Brush =====
     const levelBrush = new Map();
     function defaultBrushForLevel(l){
       const c = baseFloorColor.clone();
@@ -242,7 +254,8 @@
       const g = new THREE.GridHelper(80,80,0x2a3250,0x2a3250);
       g.material.opacity = 0.25;
       g.material.transparent = true;
-      g.position.y = l*LEVEL_HEIGHT;
+      // grid at the top surface of the floor for that level
+      g.position.y = l*LEVEL_HEIGHT + FLOOR_THICK;
       return g;
     }
     function ensureGrid(l){
@@ -252,7 +265,6 @@
         gridGroup.add(g);
       }
     }
-
     ensureGrid(activeLevel);
 
     // ===== Ghost preview =====
@@ -269,7 +281,7 @@
     const HISTORY_MAX = 60;
     let suppressHistory = false;
 
-    // ===== DOM refs (robust: assert they exist) =====
+    // ===== DOM refs =====
     const $ = (id) => document.getElementById(id);
 
     const ui = $('ui');
@@ -296,7 +308,6 @@
     const clearBtn     = $('clearBtn');
     const toggleUIBtn  = $('toggleUI');
 
-    // Basic runtime test to avoid null onclick errors
     const required = [ui, showUIBtn, toast, toolFloorBtn, toolWallBtn, toolEraseBtn, levelChip, lvlDownBtn, lvlUpBtn, brushColorInput, applyLevelColorBtn, soloBtn, snapBtn, ghostBtn, gridBtn, undoBtn, saveBtn, loadBtn, clearBtn, toggleUIBtn];
     if(required.some(x => !x)){
       throw new Error('UI elements missing. Check HTML ids.');
@@ -370,9 +381,12 @@
     }
 
     // ===== Save/Load =====
-    let currentProjectName = null; // track active project for overwrite
+    let currentProjectName = null;
     const STORAGE_KEY = 'iib_saves_v3';
-    function getSaves(){ return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    function getSaves(){
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+      catch { return {}; }
+    }
     function setSaves(o){ localStorage.setItem(STORAGE_KEY, JSON.stringify(o)); }
 
     // ===== World operations =====
@@ -383,7 +397,7 @@
       const col = colorHex ? new THREE.Color(colorHex) : getBrushColor(l);
       const mat = new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
       const m = new THREE.Mesh(geoFloor, mat);
-      m.position.set(x*GRID, l*LEVEL_HEIGHT + FLOOR_THICK*0.5, z*GRID);
+      m.position.set(x*GRID, l*LEVEL_HEIGHT + FLOOR_THICK*0.5 + EPS, z*GRID);
       m.userData = { kind:'floor', key:k };
       scene.add(m);
       WORLD.floors.set(k,m);
@@ -399,7 +413,12 @@
       pushHistory();
       const dir = DIRS[d];
       const m = new THREE.Mesh(geoWall, matWall.clone());
-      m.position.set(x*GRID + dir.dx*GRID*0.5, l*LEVEL_HEIGHT + WALL_HEIGHT*0.5, z*GRID + dir.dz*GRID*0.5);
+      // Centered in the level: bottoms at l*LEVEL_HEIGHT, tops at (l+1)*LEVEL_HEIGHT
+      m.position.set(
+        x*GRID + dir.dx*GRID*0.5,
+        l*LEVEL_HEIGHT + WALL_HEIGHT*0.5,
+        z*GRID + dir.dz*GRID*0.5
+      );
       m.rotation.y = dir.rotY;
       m.userData = { kind:'wall', key:k };
       scene.add(m);
@@ -466,7 +485,7 @@
           const col = hex ? new THREE.Color(hex) : getBrushColor(l);
           const mat = new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
           const mesh = new THREE.Mesh(geoFloor, mat);
-          mesh.position.set(x*GRID, l*LEVEL_HEIGHT + FLOOR_THICK*0.5, z*GRID);
+          mesh.position.set(x*GRID, l*LEVEL_HEIGHT + FLOOR_THICK*0.5 + EPS, z*GRID);
           mesh.userData = { kind:'floor', key:k };
           scene.add(mesh);
           WORLD.floors.set(k, mesh);
@@ -483,7 +502,11 @@
           const x = +m[1], z = +m[2], l = +m[3], d = m[4];
           const dir = DIRS[d];
           const mesh = new THREE.Mesh(geoWall, matWall.clone());
-          mesh.position.set(x*GRID + dir.dx*GRID*0.5, l*LEVEL_HEIGHT + WALL_HEIGHT*0.5, z*GRID + dir.dz*GRID*0.5);
+          mesh.position.set(
+            x*GRID + dir.dx*GRID*0.5,
+            l*LEVEL_HEIGHT + WALL_HEIGHT*0.5,
+            z*GRID + dir.dz*GRID*0.5
+          );
           mesh.rotation.y = dir.rotY;
           mesh.userData = { kind:'wall', key:k };
           scene.add(mesh);
@@ -514,7 +537,7 @@
       const objs=[...WORLD.floors.values(),...WORLD.walls.values()];
       const hits=raycaster.intersectObjects(objs,false);
       if(hits.length) return {type:'block',hit:hits[0]};
-      const y=activeLevel*LEVEL_HEIGHT;
+      const y = activeLevel*LEVEL_HEIGHT + FLOOR_THICK; // top of floor plane
       const p=new THREE.Plane(new THREE.Vector3(0,1,0),-y);
       const pos=new THREE.Vector3();
       if(raycaster.ray.intersectPlane(p,pos)) return {type:'plane',hitPoint:pos};
@@ -568,7 +591,6 @@
     renderer.domElement.addEventListener('pointerdown',e=>{
       if(e.target.closest && e.target.closest('#ui')) return;
       isDown=true; isDragging=false; downPos={x:e.clientX,y:e.clientY};
-
       if(e.shiftKey){
         painting = true;
         lastPaintKey = null;
@@ -606,14 +628,18 @@
         const g=snapPos(p);
         ghostFloor.visible=true;
         ghostWall.visible=false;
-        ghostFloor.position.set(g.x*GRID,activeLevel*LEVEL_HEIGHT+FLOOR_THICK*0.5,g.z*GRID);
+        ghostFloor.position.set(g.x*GRID,activeLevel*LEVEL_HEIGHT+FLOOR_THICK*0.5+EPS,g.z*GRID);
       } else if(tool==='wall'){
         const p=res.type==='block'?res.hit.point:res.hitPoint;
         const g=snapPos(p);
         const d=DIRS[pickDir(p)];
         ghostFloor.visible=false;
         ghostWall.visible=true;
-        ghostWall.position.set(g.x*GRID+d.dx*GRID*0.5,activeLevel*LEVEL_HEIGHT+WALL_HEIGHT*0.5,g.z*GRID+d.dz*GRID*0.5);
+        ghostWall.position.set(
+          g.x*GRID+d.dx*GRID*0.5,
+          activeLevel*LEVEL_HEIGHT + WALL_HEIGHT*0.5,
+          g.z*GRID+d.dz*GRID*0.5
+        );
         ghostWall.rotation.y=d.rotY;
       } else {
         ghostFloor.visible=false;
@@ -632,7 +658,6 @@
         controls.enabled = true;
         return;
       }
-
       if(!res || isDragging) return;
 
       if(e.button===2 || tool==='erase'){
@@ -648,13 +673,13 @@
 
     window.addEventListener('contextmenu',e=>e.preventDefault());
 
-    // ===== Movement + keyboard rotation (Q/E only) =====
+    // ===== Movement + keyboard rotation =====
     const keys = { w:false, a:false, s:false, d:false, q:false, e:false, r:false, f:false };
     let velocity = new THREE.Vector3();
-    const MOVE_SPEED = 90; // faster WASD
-    const DAMPING = 6;  // less damping for snappier feel
-    const ROT_SPEED = 1.6; // yaw radians/sec
-    const TILT_SPEED = 1.2; // pitch radians/sec
+    const MOVE_SPEED = 90;
+    const DAMPING = 6;
+    const ROT_SPEED = 1.6;
+    const TILT_SPEED = 1.2;
 
     window.addEventListener('keydown', e => {
       const k = e.key.toLowerCase();
@@ -667,7 +692,7 @@
 
     function rotateWithKeys(dt){
       if(!keys.q && !keys.e) return;
-      // Q rotates right, E rotates left (as requested)
+      // Q rotates right, E rotates left
       const angle = (keys.q ? -1 : 0) * ROT_SPEED * dt + (keys.e ? 1 : 0) * ROT_SPEED * dt;
       if(angle === 0) return;
       const target = controls.target.clone();
@@ -686,11 +711,10 @@
       const up = new THREE.Vector3(0,1,0);
       const right = new THREE.Vector3().crossVectors(offset, up).normalize();
       offset.applyAxisAngle(right, angle);
-      // clamp so we don't flip under the world
       const newDir = offset.clone().normalize();
       const dot = newDir.dot(up);
-      if(dot > 0.98) return; // too close to straight down
-      if(dot < -0.2) return; // too far up
+      if(dot > 0.995) return;
+      if(dot < -0.2) return;
       camera.position.copy(target.clone().add(offset));
       camera.lookAt(target);
     }
@@ -698,7 +722,6 @@
     function updateMovement(dt){
       rotateWithKeys(dt);
       tiltWithKeys(dt);
-      rotateWithKeys(dt);
 
       const dir = new THREE.Vector3();
       if(keys.w) dir.z += 1;
@@ -813,7 +836,6 @@
 
       const savesAll = getSaves();
       const allNames = Object.keys(savesAll).sort((a,b)=>a.localeCompare(b));
-
       let selected = currentProjectName || '';
 
       title.textContent = mode === 'save' ? 'Save Project' : 'Load Project';
@@ -826,8 +848,6 @@
 
       nameInput.value = selected;
       nameInput.placeholder = mode === 'save' ? 'Project name…' : 'Filter or select…';
-
-      // prevent any pointer stuff from leaking to the canvas
       modal.onpointerdown = (ev) => { ev.stopPropagation(); };
 
       function setSelected(name){
@@ -884,7 +904,6 @@
         }
       }
 
-      // typing filters the list in load mode; in save mode it chooses what will be overwritten/created
       nameInput.oninput = () => {
         if(mode === 'load') render(nameInput.value);
         setSelected(nameInput.value);
@@ -901,7 +920,7 @@
         if(mode === 'save'){
           const payload = snapshot();
           payload.updatedAt = Date.now();
-          saves2[name] = payload; // overwrite or create
+          saves2[name] = payload;
           setSaves(saves2);
           currentProjectName = name;
           showToast(`Saved: ${name}`);
@@ -932,7 +951,6 @@
     }
 
     saveBtn.onclick = () => openSaveLoadModal('save');
-
     loadBtn.onclick = () => openSaveLoadModal('load');
 
     clearBtn.onclick = () => {
@@ -960,7 +978,7 @@
         const mat=new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
         const k=kFloor(x,z,0);
         const m=new THREE.Mesh(geoFloor,mat);
-        m.position.set(x*GRID,0*LEVEL_HEIGHT+FLOOR_THICK*0.5,z*GRID);
+        m.position.set(x*GRID,0*LEVEL_HEIGHT+FLOOR_THICK*0.5+EPS,z*GRID);
         m.userData={kind:'floor',key:k};
         scene.add(m);
         WORLD.floors.set(k,m);
@@ -969,12 +987,18 @@
       }
       suppressHistory = false;
     }
-
     seedRoom();
 
     // ===== Optional navigation hook for future title screen =====
-    // When you add a title.html later, you can call window.openTitle() to return there.
-    window.openTitle = () => { location.href = 'title.html'; };
+    window.openTitle = () => { location.href = 'index.html'; };
+
+    // ===== Minimal runtime self-tests =====
+    function runSelfTests(){
+      console.assert(LEVEL_HEIGHT === WALL_HEIGHT, 'LEVEL_HEIGHT must equal WALL_HEIGHT for flush wall stacking');
+      console.assert(Math.abs((0*LEVEL_HEIGHT + WALL_HEIGHT) - (1*LEVEL_HEIGHT)) < 1e-9, 'Wall top at level 0 should match wall bottom at level 1');
+      console.assert(FLOOR_THICK > 0 && WALL_HEIGHT > 0, 'Heights must be positive');
+    }
+    runSelfTests();
 
     // ===== Animation loop =====
     let last = performance.now();
@@ -991,12 +1015,15 @@
     setTool('floor');
     showToast('Ready');
 
-    // ===== Warn before refresh / close to prevent losing progress =====
-    window.addEventListener('beforeunload', (e) => {
+    // ===== Warn before refresh / close =====
+    const beforeUnloadHandler = (e) => {
       e.preventDefault();
       e.returnValue = 'Are you sure you want to refresh or leave? Unsaved progress will be lost.';
       return e.returnValue;
-    });
+    };
+    window.addEventListener('beforeunload', beforeUnloadHandler);
+    window.onbeforeunload = beforeUnloadHandler;
+
     requestAnimationFrame(tick);
 
     addEventListener('resize',()=>{
@@ -1005,7 +1032,8 @@
       renderer.setSize(innerWidth,innerHeight);
     });
   </script>
-    <div id="saveModal" class="modalOverlay">
+
+  <div id="saveModal" class="modalOverlay">
     <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="saveTitle">
       <h3 id="saveTitle" class="modalTitle">Save</h3>
       <p id="saveSub" class="modalSub"></p>
