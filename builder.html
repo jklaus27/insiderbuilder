@@ -125,7 +125,7 @@
 
     <div class="hint">
       <div><span class="kbd">Click</span> place &nbsp; <span class="kbd">Drag</span> move &nbsp; <span class="kbd">Shift+Drag</span> paint &nbsp; <span class="kbd">Wheel</span> zoom</div>
-      <div><span class="kbd">WASD</span> move &nbsp; <span class="kbd">Q/E</span> rotate &nbsp; <span class="kbd">Right Click</span> erase &nbsp; <span class="kbd">Ctrl+Z</span> undo</div>
+      <div><span class="kbd">WASD</span> move &nbsp; <span class="kbd">Q/E</span> rotate &nbsp; <span class="kbd">R/F</span> tilt &nbsp; <span class="kbd">Right Click</span> erase &nbsp; <span class="kbd">Ctrl+Z</span> undo</div>
       <div style="opacity:0.85">Tip: Brush changes only new tiles. Use “Apply to Level” if you want a full recolor.</div>
     </div>
   </div>
@@ -633,11 +633,12 @@
     window.addEventListener('contextmenu',e=>e.preventDefault());
 
     // ===== Movement + keyboard rotation (Q/E only) =====
-    const keys = { w:false, a:false, s:false, d:false, q:false, e:false };
+    const keys = { w:false, a:false, s:false, d:false, q:false, e:false, r:false, f:false };
     let velocity = new THREE.Vector3();
     const MOVE_SPEED = 90; // faster WASD
     const DAMPING = 6;  // less damping for snappier feel
-    const ROT_SPEED = 1.6; // radians/sec
+    const ROT_SPEED = 1.6; // yaw radians/sec
+    const TILT_SPEED = 1.2; // pitch radians/sec
 
     window.addEventListener('keydown', e => {
       const k = e.key.toLowerCase();
@@ -660,7 +661,27 @@
       camera.lookAt(target);
     }
 
+    function tiltWithKeys(dt){
+      if(!keys.r && !keys.f) return;
+      const angle = (keys.r ? 1 : 0) * TILT_SPEED * dt + (keys.f ? -1 : 0) * TILT_SPEED * dt;
+      if(angle === 0) return;
+      const target = controls.target.clone();
+      const offset = camera.position.clone().sub(target);
+      const up = new THREE.Vector3(0,1,0);
+      const right = new THREE.Vector3().crossVectors(offset, up).normalize();
+      offset.applyAxisAngle(right, angle);
+      // clamp so we don't flip under the world
+      const newDir = offset.clone().normalize();
+      const dot = newDir.dot(up);
+      if(dot > 0.98) return; // too close to straight down
+      if(dot < -0.2) return; // too far up
+      camera.position.copy(target.clone().add(offset));
+      camera.lookAt(target);
+    }
+
     function updateMovement(dt){
+      rotateWithKeys(dt);
+      tiltWithKeys(dt);
       rotateWithKeys(dt);
 
       const dir = new THREE.Vector3();
@@ -848,3 +869,4 @@
   </script>
 </body>
 </html>
+
