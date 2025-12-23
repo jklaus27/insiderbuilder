@@ -784,25 +784,71 @@
       }
     }, true);
 
-    saveBtn.onclick = () => {
-      const name = prompt('Save as name:');
-      if(!name) return;
-      const saves = getSaves();
-      saves[name] = snapshot();
-      setSaves(saves);
-      showToast(`Saved: ${name}`);
-    };
+    function openSaveLoadModal(mode){
+      const modal = document.getElementById('saveModal');
+      const list = document.getElementById('saveList');
+      const title = document.getElementById('saveTitle');
+      const nameInput = document.getElementById('saveName');
+      const actionBtn = document.getElementById('saveAction');
+      const newBtn = document.getElementById('newProject');
 
-    loadBtn.onclick = () => {
+      title.textContent = mode === 'save' ? 'Save Project' : 'Load Project';
+      actionBtn.textContent = mode === 'save' ? 'Save' : 'Load';
+      nameInput.style.display = mode === 'save' ? 'block' : 'none';
+
+      list.innerHTML = '';
       const saves = getSaves();
       const names = Object.keys(saves);
-      if(names.length===0){ showToast('No saves yet'); return; }
-      const name = prompt('Load which?\n' + names.join('\n'));
-      if(!name || !saves[name]) return;
-      pushHistory();
-      loadState(saves[name]);
-      showToast(`Loaded: ${name}`);
-    };
+      if(names.length === 0){
+        const li = document.createElement('div');
+        li.textContent = 'No saves yet';
+        li.style.opacity = '0.7';
+        list.appendChild(li);
+      } else {
+        names.forEach(n => {
+          const item = document.createElement('div');
+          item.className = 'saveItem';
+          item.textContent = n;
+          item.onclick = () => { nameInput.value = n; };
+          list.appendChild(item);
+        });
+      }
+
+      actionBtn.onclick = () => {
+        const name = nameInput.value.trim();
+        if(!name) return;
+        const saves2 = getSaves();
+        if(mode === 'save'){
+          saves2[name] = snapshot();
+          setSaves(saves2);
+          showToast(`Saved: ${name}`);
+        } else {
+          if(!saves2[name]) return;
+          pushHistory();
+          loadState(saves2[name]);
+          showToast(`Loaded: ${name}`);
+        }
+        modal.style.display = 'none';
+      };
+
+      newBtn.onclick = () => {
+        if(!confirm('Create a new project? Current build will be cleared.')) return;
+        pushHistory();
+        clearWorld();
+        modal.style.display = 'none';
+        showToast('New project');
+      };
+
+      document.getElementById('closeSave').onclick = () => {
+        modal.style.display = 'none';
+      };
+
+      modal.style.display = 'flex';
+    }
+
+    saveBtn.onclick = () => openSaveLoadModal('save');
+
+    loadBtn.onclick = () => openSaveLoadModal('load');
 
     clearBtn.onclick = () => {
       if(!confirm('Are you sure? This will delete the entire build.')) return;
@@ -867,6 +913,17 @@
       renderer.setSize(innerWidth,innerHeight);
     });
   </script>
+  <div id="saveModal" style="display:none;position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:20;align-items:center;justify-content:center;">
+    <div style="background:rgba(15,18,28,0.95);border:1px solid rgba(255,255,255,0.15);border-radius:16px;padding:16px;width:320px;max-height:70vh;display:flex;flex-direction:column;color:#e8ecff;">
+      <h3 id="saveTitle" style="margin:0 0 10px;font-size:16px;">Save</h3>
+      <input id="saveName" placeholder="Name..." style="margin-bottom:8px;padding:8px;border-radius:10px;border:1px solid rgba(255,255,255,0.2);background:#0b0d12;color:#e8ecff;" />
+      <div id="saveList" style="flex:1;overflow:auto;margin-bottom:10px;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <button class="btn" id="newProject">New</button>
+        <button class="btn" id="saveAction">Save</button>
+        <button class="btn" id="closeSave">Close</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
-
