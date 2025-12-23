@@ -133,9 +133,718 @@
   <button id="showUI" class="btn">Show UI</button>
   <div id="toast"></div>
 
-  <!-- FULL JS CODE CONTINUES -->
-  <!-- This is already included above in your canvas and remains unchanged -->
-  <!-- For brevity here, it is the same as the version you were just editing -->
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+    // ===== World constants =====
+    const GRID = 1;
+    const LEVEL_HEIGHT = 3;
+    const WALL_HEIGHT = 2.6;
+    const WALL_THICK = 0.18;
+    const FLOOR_THICK = 0.12;
+
+    // ===== Data =====
+    const WORLD = {
+      floors: new Map(),
+      walls: new Map(),
+      data: { floors: new Set(), walls: new Set() },
+      floorColors: new Map()
+    };
+
+    const kFloor = (x,z,l) => `F:${x},${z},${l}`;
+    const kWall  = (x,z,l,d) => `W:${x},${z},${l},${d}`;
+
+    const DIRS = {
+      N: { dx: 0, dz: -1, rotY: 0 },
+      E: { dx: 1, dz: 0, rotY: Math.PI/2 },
+      S: { dx: 0, dz: 1, rotY: Math.PI },
+      W: { dx: -1, dz: 0, rotY: -Math.PI/2 }
+    };
+
+    // ===== Renderer / Scene =====
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x0b0d12, 35, 190);
+
+    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.05, 600);
+    camera.position.set(12,10,16);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.enableRotate = false; // mouse drag pans
+    controls.enablePan = true;
+    controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+
+    scene.add(new THREE.HemisphereLight(0xb7c6ff, 0x0b0d12, 0.7));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+    sun.position.set(10,20,10);
+    scene.add(sun);
+
+    const baseFloorColor = new THREE.Color(0x1a2236);
+    const matWall = new THREE.MeshStandardMaterial({ color: 0x303a52, roughness: 0.9 });
+
+    const matGhostFloor = new THREE.MeshStandardMaterial({ color: 0x8aa1ff, transparent: true, opacity: 0.3 });
+    const matGhostWall  = new THREE.MeshStandardMaterial({ color: 0x8aa1ff, transparent: true, opacity: 0.25 });
+
+    const geoFloor = new THREE.BoxGeometry(GRID, FLOOR_THICK, GRID);
+    const geoWall  = new THREE.BoxGeometry(GRID, WALL_HEIGHT, WALL_THICK);
+
+    // ===== Brush (defaults per level, but editing is per-tile going forward) =====
+    const levelBrush = new Map();
+    function defaultBrushForLevel(l){
+      const c = baseFloorColor.clone();
+      const hsl = {}; c.getHSL(hsl);
+      const shift = (l * 0.04) % 1;
+      c.setHSL((hsl.h + shift) % 1, hsl.s * 0.9, Math.min(1, hsl.l * (1 + l*0.02)));
+      return c;
+    }
+    function getBrushColor(l){
+      if(!levelBrush.has(l)) levelBrush.set(l, defaultBrushForLevel(l));
+      return levelBrush.get(l);
+    }
+
+    // ===== UI state =====
+    let activeLevel = 0;
+    let soloLevel = false;
+    let gridVisible = true;
+    let tool = 'floor';
+    let snapEnabled = true;
+    let ghostEnabled = true;
+
+    // ===== Grid helpers per level =====
+    const gridGroup = new THREE.Group();
+    scene.add(gridGroup);
+    const grids = new Map();
+
+    function makeGrid(l){
+      const g = new THREE.GridHelper(80,80,0x2a3250,0x2a3250);
+      g.material.opacity = 0.25;
+      g.material.transparent = true;
+      g.position.y = l*LEVEL_HEIGHT;
+      return g;
+    }
+    function ensureGrid(l){
+      if(!grids.has(l)){
+        const g=makeGrid(l);
+        grids.set(l,g);
+        gridGroup.add(g);
+      }
+    }
+
+    ensureGrid(activeLevel);
+
+    // ===== Ghost preview =====
+    const ghostGroup = new THREE.Group();
+    scene.add(ghostGroup);
+    const ghostFloor = new THREE.Mesh(geoFloor, matGhostFloor);
+    ghostGroup.add(ghostFloor);
+    const ghostWall  = new THREE.Mesh(geoWall, matGhostWall);
+    ghostWall.visible=false;
+    ghostGroup.add(ghostWall);
+
+    // ===== History =====
+    const history = [];
+    const HISTORY_MAX = 60;
+    let suppressHistory = false;
+
+    // ===== DOM refs (robust: assert they exist) =====
+    const $ = (id) => document.getElementById(id);
+
+    const ui = $('ui');
+    const showUIBtn = $('showUI');
+    const toast = $('toast');
+
+    const toolFloorBtn = $('toolFloor');
+    const toolWallBtn  = $('toolWall');
+    const toolEraseBtn = $('toolErase');
+    const levelChip    = $('levelChip');
+
+    const lvlDownBtn   = $('lvlDown');
+    const lvlUpBtn     = $('lvlUp');
+    const brushColorInput = $('brushColor');
+    const applyLevelColorBtn = $('applyLevelColor');
+    const soloBtn      = $('soloBtn');
+
+    const snapBtn      = $('snapBtn');
+    const ghostBtn     = $('ghostBtn');
+    const gridBtn      = $('gridBtn');
+    const undoBtn      = $('undoBtn');
+    const saveBtn      = $('saveBtn');
+    const loadBtn      = $('loadBtn');
+    const clearBtn     = $('clearBtn');
+    const toggleUIBtn  = $('toggleUI');
+
+    // Basic runtime test to avoid null onclick errors
+    const required = [ui, showUIBtn, toast, toolFloorBtn, toolWallBtn, toolEraseBtn, levelChip, lvlDownBtn, lvlUpBtn, brushColorInput, applyLevelColorBtn, soloBtn, snapBtn, ghostBtn, gridBtn, undoBtn, saveBtn, loadBtn, clearBtn, toggleUIBtn];
+    if(required.some(x => !x)){
+      throw new Error('UI elements missing. Check HTML ids.');
+    }
+
+    function showToast(m){
+      toast.textContent=m;
+      toast.classList.add('show');
+      clearTimeout(showToast.t);
+      showToast.t=setTimeout(()=>toast.classList.remove('show'),1200);
+    }
+
+    function isTypingTarget(el){
+      return el && (el.tagName==='INPUT' || el.tagName==='TEXTAREA' || el.isContentEditable);
+    }
+
+    function snapshot(){
+      return {
+        floors: [...WORLD.data.floors],
+        walls: [...WORLD.data.walls],
+        floorColors: Object.fromEntries(WORLD.floorColors.entries()),
+        levelBrush: Object.fromEntries([...levelBrush.entries()].map(([l,c])=>[l, `#${c.getHexString()}`])),
+        activeLevel
+      };
+    }
+
+    function pushHistory(){
+      if(suppressHistory) return;
+      history.push(snapshot());
+      if(history.length>HISTORY_MAX) history.shift();
+    }
+
+    function updateVisibility(){
+      for(const [k,m] of WORLD.floors){
+        const lvl = parseInt(k.split(',')[2]);
+        m.visible = !soloLevel || lvl === activeLevel;
+      }
+      for(const [k,m] of WORLD.walls){
+        const lvl = parseInt(k.split(',')[2]);
+        m.visible = !soloLevel || lvl === activeLevel;
+      }
+      for(const [l,g] of grids){
+        g.visible = gridVisible && (!soloLevel || l === activeLevel);
+      }
+    }
+
+    function updateLevelUI(){
+      levelChip.textContent = `Level: ${activeLevel}`;
+      ensureGrid(activeLevel);
+      const c = getBrushColor(activeLevel);
+      brushColorInput.value = `#${c.getHexString()}`;
+      matGhostFloor.color.copy(c).offsetHSL(0,0,0.15);
+      updateVisibility();
+    }
+
+    function setTool(t){
+      tool=t;
+      toolFloorBtn.classList.toggle('active',t==='floor');
+      toolWallBtn.classList.toggle('active',t==='wall');
+      toolEraseBtn.classList.toggle('active',t==='erase');
+      ghostFloor.visible = ghostEnabled && t==='floor';
+      ghostWall.visible  = ghostEnabled && t==='wall';
+      renderer.domElement.style.cursor = t==='erase' ? 'not-allowed' : 'crosshair';
+    }
+
+    function undo(){
+      if(history.length===0) return;
+      const s = history.pop();
+      loadState(s);
+      showToast('Undo');
+    }
+
+    // ===== Save/Load =====
+    const STORAGE_KEY = 'iib_saves_v2';
+    function getSaves(){ return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    function setSaves(o){ localStorage.setItem(STORAGE_KEY, JSON.stringify(o)); }
+
+    // ===== World operations =====
+    function placeFloor(x,z,l, colorHex){
+      const k = kFloor(x,z,l);
+      if(WORLD.data.floors.has(k)) return;
+      pushHistory();
+      const col = colorHex ? new THREE.Color(colorHex) : getBrushColor(l);
+      const mat = new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
+      const m = new THREE.Mesh(geoFloor, mat);
+      m.position.set(x*GRID, l*LEVEL_HEIGHT + FLOOR_THICK*0.5, z*GRID);
+      m.userData = { kind:'floor', key:k };
+      scene.add(m);
+      WORLD.floors.set(k,m);
+      WORLD.data.floors.add(k);
+      WORLD.floorColors.set(k, `#${col.getHexString()}`);
+      ensureGrid(l);
+      updateVisibility();
+    }
+
+    function placeWall(x,z,l,d){
+      const k = kWall(x,z,l,d);
+      if(WORLD.data.walls.has(k)) return;
+      pushHistory();
+      const dir = DIRS[d];
+      const m = new THREE.Mesh(geoWall, matWall.clone());
+      m.position.set(x*GRID + dir.dx*GRID*0.5, l*LEVEL_HEIGHT + WALL_HEIGHT*0.5, z*GRID + dir.dz*GRID*0.5);
+      m.rotation.y = dir.rotY;
+      m.userData = { kind:'wall', key:k };
+      scene.add(m);
+      WORLD.walls.set(k,m);
+      WORLD.data.walls.add(k);
+      ensureGrid(l);
+      updateVisibility();
+    }
+
+    function eraseBlock(obj){
+      if(!obj) return;
+      pushHistory();
+      const {kind,key} = obj.userData;
+      if(kind==='floor'){
+        scene.remove(obj);
+        WORLD.floors.delete(key);
+        WORLD.data.floors.delete(key);
+        WORLD.floorColors.delete(key);
+      }
+      if(kind==='wall'){
+        scene.remove(obj);
+        WORLD.walls.delete(key);
+        WORLD.data.walls.delete(key);
+      }
+      updateVisibility();
+    }
+
+    function clearWorld(){
+      for(const m of WORLD.floors.values()) scene.remove(m);
+      for(const m of WORLD.walls.values()) scene.remove(m);
+      WORLD.floors.clear();
+      WORLD.walls.clear();
+      WORLD.data.floors.clear();
+      WORLD.data.walls.clear();
+      WORLD.floorColors.clear();
+      updateVisibility();
+    }
+
+    function loadState(s){
+      suppressHistory = true;
+      clearWorld();
+
+      levelBrush.clear();
+      if(s.levelBrush){
+        for(const [l,hex] of Object.entries(s.levelBrush)){
+          levelBrush.set(+l, new THREE.Color(hex));
+          ensureGrid(+l);
+        }
+      }
+
+      WORLD.floorColors.clear();
+      if(s.floorColors){
+        for(const [k,hex] of Object.entries(s.floorColors)){
+          WORLD.floorColors.set(k, hex);
+        }
+      }
+
+      if(s.floors){
+        for(const k of s.floors){
+          const m = /F:(-?\d+),(-?\d+),(-?\d+)/.exec(k);
+          if(!m) continue;
+          const x = +m[1], z = +m[2], l = +m[3];
+          const hex = WORLD.floorColors.get(k);
+          const col = hex ? new THREE.Color(hex) : getBrushColor(l);
+          const mat = new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
+          const mesh = new THREE.Mesh(geoFloor, mat);
+          mesh.position.set(x*GRID, l*LEVEL_HEIGHT + FLOOR_THICK*0.5, z*GRID);
+          mesh.userData = { kind:'floor', key:k };
+          scene.add(mesh);
+          WORLD.floors.set(k, mesh);
+          WORLD.data.floors.add(k);
+          WORLD.floorColors.set(k, `#${col.getHexString()}`);
+          ensureGrid(l);
+        }
+      }
+
+      if(s.walls){
+        for(const k of s.walls){
+          const m = /W:(-?\d+),(-?\d+),(-?\d+),(N|E|S|W)/.exec(k);
+          if(!m) continue;
+          const x = +m[1], z = +m[2], l = +m[3], d = m[4];
+          const dir = DIRS[d];
+          const mesh = new THREE.Mesh(geoWall, matWall.clone());
+          mesh.position.set(x*GRID + dir.dx*GRID*0.5, l*LEVEL_HEIGHT + WALL_HEIGHT*0.5, z*GRID + dir.dz*GRID*0.5);
+          mesh.rotation.y = dir.rotY;
+          mesh.userData = { kind:'wall', key:k };
+          scene.add(mesh);
+          WORLD.walls.set(k, mesh);
+          WORLD.data.walls.add(k);
+          ensureGrid(l);
+        }
+      }
+
+      activeLevel = (s.activeLevel!==undefined) ? s.activeLevel : 0;
+      suppressHistory = false;
+      updateLevelUI();
+    }
+
+    // ===== Picking =====
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function setMouse(e){
+      const r = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+      mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+    }
+
+    function pick(e){
+      setMouse(e);
+      raycaster.setFromCamera(mouse,camera);
+      const objs=[...WORLD.floors.values(),...WORLD.walls.values()];
+      const hits=raycaster.intersectObjects(objs,false);
+      if(hits.length) return {type:'block',hit:hits[0]};
+      const y=activeLevel*LEVEL_HEIGHT;
+      const p=new THREE.Plane(new THREE.Vector3(0,1,0),-y);
+      const pos=new THREE.Vector3();
+      if(raycaster.ray.intersectPlane(p,pos)) return {type:'plane',hitPoint:pos};
+      return null;
+    }
+
+    function snapPos(pos){
+      return {
+        x: snapEnabled ? Math.round(pos.x/GRID) : (pos.x/GRID),
+        z: snapEnabled ? Math.round(pos.z/GRID) : (pos.z/GRID)
+      };
+    }
+
+    function pickDir(pos){
+      const cx=Math.round(pos.x/GRID), cz=Math.round(pos.z/GRID);
+      const lx=pos.x-cx*GRID, lz=pos.z-cz*GRID;
+      return Math.abs(lx)>Math.abs(lz) ? (lx>0?'E':'W') : (lz>0?'S':'N');
+    }
+
+    // ===== Hover highlight in erase mode =====
+    let hovered=null, hoveredMat=null;
+    function restoreHover(){
+      if(hovered){ hovered.material = hoveredMat; hovered=null; hoveredMat=null; }
+    }
+
+    // ===== Input: click vs drag + Shift paint =====
+    let isDown=false, isDragging=false, painting=false, downPos={x:0,y:0};
+    let lastPaintKey = null;
+
+    function paintAtResult(res){
+      if(!res) return;
+      if(res.type==='block'){
+        if(tool==='erase') eraseBlock(res.hit.object);
+        return;
+      }
+      const p = res.hitPoint;
+      const g = snapPos(p);
+      const x = Math.round(g.x);
+      const z = Math.round(g.z);
+      if(tool==='floor'){
+        const k = kFloor(x,z,activeLevel);
+        if(lastPaintKey!==k){ placeFloor(x,z,activeLevel); lastPaintKey = k; }
+      }
+      if(tool==='wall'){
+        const d = pickDir(p);
+        const k = kWall(x,z,activeLevel,d);
+        if(lastPaintKey!==k){ placeWall(x,z,activeLevel,d); lastPaintKey = k; }
+      }
+    }
+
+    renderer.domElement.addEventListener('pointerdown',e=>{
+      if(e.target.closest && e.target.closest('#ui')) return;
+      isDown=true; isDragging=false; downPos={x:e.clientX,y:e.clientY};
+
+      if(e.shiftKey){
+        painting = true;
+        lastPaintKey = null;
+        controls.enabled = false;
+        const res = pick(e);
+        paintAtResult(res);
+      }
+    });
+
+    renderer.domElement.addEventListener('pointermove',e=>{
+      if(isDown){
+        const dx=e.clientX-downPos.x, dy=e.clientY-downPos.y;
+        if(Math.hypot(dx,dy)>5) isDragging=true;
+      }
+
+      const res=pick(e);
+      restoreHover();
+
+      if(tool==='erase' && res?.type==='block'){
+        hovered=res.hit.object;
+        hoveredMat=hovered.material;
+        hovered.material=hovered.material.clone();
+        hovered.material.color.set(0xff4444);
+      }
+
+      if(painting){
+        paintAtResult(res);
+        return;
+      }
+
+      if(!ghostEnabled || !res) return;
+
+      if(tool==='floor'){
+        const p=res.type==='block'?res.hit.point:res.hitPoint;
+        const g=snapPos(p);
+        ghostFloor.visible=true;
+        ghostWall.visible=false;
+        ghostFloor.position.set(g.x*GRID,activeLevel*LEVEL_HEIGHT+FLOOR_THICK*0.5,g.z*GRID);
+      } else if(tool==='wall'){
+        const p=res.type==='block'?res.hit.point:res.hitPoint;
+        const g=snapPos(p);
+        const d=DIRS[pickDir(p)];
+        ghostFloor.visible=false;
+        ghostWall.visible=true;
+        ghostWall.position.set(g.x*GRID+d.dx*GRID*0.5,activeLevel*LEVEL_HEIGHT+WALL_HEIGHT*0.5,g.z*GRID+d.dz*GRID*0.5);
+        ghostWall.rotation.y=d.rotY;
+      } else {
+        ghostFloor.visible=false;
+        ghostWall.visible=false;
+      }
+    });
+
+    renderer.domElement.addEventListener('pointerup',e=>{
+      if(e.target.closest && e.target.closest('#ui')) return;
+      const res=pick(e);
+      isDown=false;
+
+      if(painting){
+        painting = false;
+        lastPaintKey = null;
+        controls.enabled = true;
+        return;
+      }
+
+      if(!res || isDragging) return;
+
+      if(e.button===2 || tool==='erase'){
+        if(res.type==='block') eraseBlock(res.hit.object);
+        return;
+      }
+
+      const p=res.type==='block'?res.hit.point:res.hitPoint;
+      const g=snapPos(p);
+      if(tool==='floor') placeFloor(Math.round(g.x),Math.round(g.z),activeLevel);
+      if(tool==='wall') placeWall(Math.round(g.x),Math.round(g.z),activeLevel,pickDir(p));
+    });
+
+    window.addEventListener('contextmenu',e=>e.preventDefault());
+
+    // ===== Movement + keyboard rotation (Q/E only) =====
+    const keys = { w:false, a:false, s:false, d:false, q:false, e:false };
+    let velocity = new THREE.Vector3();
+    const MOVE_SPEED = 90; // faster WASD
+    const DAMPING = 6;  // less damping for snappier feel
+    const ROT_SPEED = 1.6; // radians/sec
+
+    window.addEventListener('keydown', e => {
+      const k = e.key.toLowerCase();
+      if(k in keys) keys[k] = true;
+    });
+    window.addEventListener('keyup', e => {
+      const k = e.key.toLowerCase();
+      if(k in keys) keys[k] = false;
+    });
+
+    function rotateWithKeys(dt){
+      if(!keys.q && !keys.e) return;
+      // Q rotates right, E rotates left (as requested)
+      const angle = (keys.q ? -1 : 0) * ROT_SPEED * dt + (keys.e ? 1 : 0) * ROT_SPEED * dt;
+      if(angle === 0) return;
+      const target = controls.target.clone();
+      const offset = camera.position.clone().sub(target);
+      offset.applyAxisAngle(new THREE.Vector3(0,1,0), angle);
+      camera.position.copy(target.clone().add(offset));
+      camera.lookAt(target);
+    }
+
+    function updateMovement(dt){
+      rotateWithKeys(dt);
+
+      const dir = new THREE.Vector3();
+      if(keys.w) dir.z += 1;
+      if(keys.s) dir.z -= 1;
+      if(keys.a) dir.x -= 1;
+      if(keys.d) dir.x += 1;
+      if(dir.lengthSq()>0) dir.normalize();
+
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+      forward.y = 0;
+      forward.normalize();
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).normalize();
+
+      const wish = new THREE.Vector3();
+      wish.addScaledVector(forward, dir.z);
+      wish.addScaledVector(right, dir.x);
+
+      velocity.addScaledVector(wish, MOVE_SPEED * dt);
+      velocity.addScaledVector(velocity, -DAMPING * dt);
+
+      camera.position.addScaledVector(velocity, dt);
+      controls.target.addScaledVector(velocity, dt);
+    }
+
+    function changeLevel(d){
+      activeLevel += d;
+      if(activeLevel<-8) activeLevel=-8;
+      if(activeLevel>32) activeLevel=32;
+      updateLevelUI();
+    }
+
+    // ===== Wire UI events =====
+    toolFloorBtn.onclick = () => setTool('floor');
+    toolWallBtn.onclick  = () => setTool('wall');
+    toolEraseBtn.onclick = () => setTool('erase');
+
+    lvlDownBtn.onclick = () => changeLevel(-1);
+    lvlUpBtn.onclick   = () => changeLevel(1);
+
+    brushColorInput.oninput = (e) => {
+      pushHistory();
+      const col = new THREE.Color(e.target.value);
+      levelBrush.set(activeLevel, col);
+      matGhostFloor.color.copy(col).offsetHSL(0,0,0.15);
+      showToast('Brush color updated');
+    };
+
+    applyLevelColorBtn.onclick = () => {
+      pushHistory();
+      const col = getBrushColor(activeLevel);
+      for(const [k,m] of WORLD.floors){
+        const lvl = parseInt(k.split(',')[2]);
+        if(lvl===activeLevel){
+          m.material.color.copy(col);
+          WORLD.floorColors.set(k, `#${col.getHexString()}`);
+        }
+      }
+      showToast('Applied to level');
+    };
+
+    snapBtn.onclick = () => {
+      snapEnabled=!snapEnabled;
+      snapBtn.classList.toggle('active',snapEnabled);
+      snapBtn.textContent=`Snap: ${snapEnabled?'On':'Off'}`;
+    };
+
+    ghostBtn.onclick = () => {
+      ghostEnabled=!ghostEnabled;
+      ghostBtn.classList.toggle('active',ghostEnabled);
+      ghostBtn.textContent=`Ghost: ${ghostEnabled?'On':'Off'}`;
+      ghostFloor.visible = ghostEnabled && tool==='floor';
+      ghostWall.visible  = ghostEnabled && tool==='wall';
+    };
+
+    gridBtn.onclick = () => {
+      gridVisible=!gridVisible;
+      gridBtn.classList.toggle('active',gridVisible);
+      gridBtn.textContent=`Grid: ${gridVisible?'On':'Off'}`;
+      updateVisibility();
+    };
+
+    soloBtn.onclick = () => {
+      soloLevel=!soloLevel;
+      soloBtn.classList.toggle('active',soloLevel);
+      soloBtn.textContent=`Solo: ${soloLevel?'On':'Off'}`;
+      updateVisibility();
+    };
+
+    undoBtn.onclick = () => undo();
+
+    window.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      const isUndo = (key==='z' && (e.ctrlKey || e.metaKey));
+      if(isUndo && !isTypingTarget(document.activeElement)){
+        e.preventDefault();
+        e.stopPropagation();
+        undo();
+      }
+    }, true);
+
+    saveBtn.onclick = () => {
+      const name = prompt('Save as name:');
+      if(!name) return;
+      const saves = getSaves();
+      saves[name] = snapshot();
+      setSaves(saves);
+      showToast(`Saved: ${name}`);
+    };
+
+    loadBtn.onclick = () => {
+      const saves = getSaves();
+      const names = Object.keys(saves);
+      if(names.length===0){ showToast('No saves yet'); return; }
+      const name = prompt('Load which?\n' + names.join('\n'));
+      if(!name || !saves[name]) return;
+      pushHistory();
+      loadState(saves[name]);
+      showToast(`Loaded: ${name}`);
+    };
+
+    clearBtn.onclick = () => {
+      if(!confirm('Are you sure? This will delete the entire build.')) return;
+      pushHistory();
+      clearWorld();
+      showToast('Cleared');
+    };
+
+    toggleUIBtn.onclick = () => {
+      ui.style.display='none';
+      showUIBtn.style.display='block';
+    };
+
+    showUIBtn.onclick = () => {
+      ui.style.display='block';
+      showUIBtn.style.display='none';
+    };
+
+    // ===== Seed a starter pad (no history) =====
+    function seedRoom(){
+      suppressHistory = true;
+      for(let x=-3;x<=2;x++) for(let z=-2;z<=2;z++){
+        const col=getBrushColor(0);
+        const mat=new THREE.MeshStandardMaterial({ color: col.clone(), roughness: 0.95 });
+        const k=kFloor(x,z,0);
+        const m=new THREE.Mesh(geoFloor,mat);
+        m.position.set(x*GRID,0*LEVEL_HEIGHT+FLOOR_THICK*0.5,z*GRID);
+        m.userData={kind:'floor',key:k};
+        scene.add(m);
+        WORLD.floors.set(k,m);
+        WORLD.data.floors.add(k);
+        WORLD.floorColors.set(k, `#${col.getHexString()}`);
+      }
+      suppressHistory = false;
+    }
+
+    seedRoom();
+
+    // ===== Optional navigation hook for future title screen =====
+    // When you add a title.html later, you can call window.openTitle() to return there.
+    window.openTitle = () => { location.href = 'title.html'; };
+
+    // ===== Animation loop =====
+    let last = performance.now();
+    function tick(t){
+      const dt = Math.min(0.05,(t-last)/1000);
+      last=t;
+      controls.update();
+      updateMovement(dt);
+      renderer.render(scene,camera);
+      requestAnimationFrame(tick);
+    }
+
+    updateLevelUI();
+    setTool('floor');
+    showToast('Ready');
+    requestAnimationFrame(tick);
+
+    addEventListener('resize',()=>{
+      camera.aspect=innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth,innerHeight);
+    });
+  </script>
 </body>
 </html>
