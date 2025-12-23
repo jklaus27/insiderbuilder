@@ -79,6 +79,21 @@
     #showUI {
       position: fixed; left: 12px; top: 12px; display: none; z-index: 11;
     }
+    .modalOverlay{display:none;position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:20;align-items:center;justify-content:center;}
+    .modalCard{background:rgba(15,18,28,0.95);border:1px solid rgba(255,255,255,0.15);border-radius:16px;padding:16px;width:min(420px,92vw);max-height:70vh;display:flex;flex-direction:column;color:#e8ecff;box-shadow:0 20px 60px rgba(0,0,0,0.55);}
+    .modalTitle{margin:0 0 6px;font-size:16px;}
+    .modalSub{margin:0 0 12px;font-size:12px;opacity:0.8;line-height:1.35;}
+    .modalRow{display:flex;gap:8px;align-items:center;}
+    .modalInput{flex:1;margin-bottom:8px;padding:10px 10px;border-radius:12px;border:1px solid rgba(255,255,255,0.2);background:#0b0d12;color:#e8ecff;outline:none;}
+    .modalInput:focus{border-color:rgba(120,140,255,0.7)}
+    .saveList{flex:1;overflow:auto;margin-bottom:10px;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:6px;background:rgba(255,255,255,0.03)}
+    .saveItem{display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;padding:10px 10px;border-radius:12px;cursor:pointer;border:1px solid rgba(255,255,255,0.10);margin-bottom:6px;background:transparent;color:#e8ecff;}
+    .saveItem:hover{background:rgba(255,255,255,0.08)}
+    .saveItem.active{background:rgba(120,140,255,0.25);border-color:rgba(120,140,255,0.6)}
+    .saveMeta{font-size:11px;opacity:0.7}
+    .btn[disabled]{opacity:0.45;cursor:not-allowed}
+    .selectedLine{font-size:12px;opacity:0.85;margin:0 0 10px}
+
   </style>
 
   <script type="importmap">
@@ -355,7 +370,8 @@
     }
 
     // ===== Save/Load =====
-    const STORAGE_KEY = 'iib_saves_v2';
+    let currentProjectName = null; // track active project for overwrite
+    const STORAGE_KEY = 'iib_saves_v3';
     function getSaves(){ return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
     function setSaves(o){ localStorage.setItem(STORAGE_KEY, JSON.stringify(o)); }
 
@@ -788,44 +804,112 @@
       const modal = document.getElementById('saveModal');
       const list = document.getElementById('saveList');
       const title = document.getElementById('saveTitle');
+      const sub = document.getElementById('saveSub');
+      const selectedLine = document.getElementById('selectedLine');
       const nameInput = document.getElementById('saveName');
       const actionBtn = document.getElementById('saveAction');
       const newBtn = document.getElementById('newProject');
+      const closeBtn = document.getElementById('closeSave');
+
+      const savesAll = getSaves();
+      const allNames = Object.keys(savesAll).sort((a,b)=>a.localeCompare(b));
+
+      let selected = currentProjectName || '';
 
       title.textContent = mode === 'save' ? 'Save Project' : 'Load Project';
-      actionBtn.textContent = mode === 'save' ? 'Save' : 'Load';
-      nameInput.style.display = mode === 'save' ? 'block' : 'none';
+      sub.textContent = mode === 'save'
+        ? 'Type a name and click Save. If it already exists, it overwrites the old version.'
+        : 'Click a project to select it, then click Load.';
 
-      list.innerHTML = '';
-      const saves = getSaves();
-      const names = Object.keys(saves);
-      if(names.length === 0){
-        const li = document.createElement('div');
-        li.textContent = 'No saves yet';
-        li.style.opacity = '0.7';
-        list.appendChild(li);
-      } else {
-        names.forEach(n => {
-          const item = document.createElement('div');
-          item.className = 'saveItem';
-          item.textContent = n;
-          item.onclick = () => { nameInput.value = n; };
-          list.appendChild(item);
+      actionBtn.textContent = mode === 'save' ? 'Save' : 'Load';
+      actionBtn.disabled = !selected;
+
+      nameInput.value = selected;
+      nameInput.placeholder = mode === 'save' ? 'Project name…' : 'Filter or select…';
+
+      // prevent any pointer stuff from leaking to the canvas
+      modal.onpointerdown = (ev) => { ev.stopPropagation(); };
+
+      function setSelected(name){
+        selected = (name || '').trim();
+        selectedLine.textContent = selected ? `Selected: ${selected}` : 'Selected: (none)';
+        actionBtn.disabled = !selected;
+        [...list.querySelectorAll('.saveItem')].forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.name === selected);
         });
       }
 
+      function render(filter){
+        const f = (filter || '').trim().toLowerCase();
+        list.innerHTML = '';
+
+        const names = allNames.filter(n => !f || n.toLowerCase().includes(f));
+        if(names.length === 0){
+          const empty = document.createElement('div');
+          empty.textContent = allNames.length === 0 ? 'No saves yet' : 'No matches';
+          empty.style.opacity = '0.7';
+          empty.style.padding = '10px';
+          list.appendChild(empty);
+          return;
+        }
+
+        for(const n of names){
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'saveItem' + (n === selected ? ' active' : '');
+          btn.dataset.name = n;
+
+          const left = document.createElement('div');
+          left.textContent = n;
+
+          const meta = document.createElement('div');
+          meta.className = 'saveMeta';
+          const stamp = savesAll[n]?.updatedAt ? new Date(savesAll[n].updatedAt).toLocaleString() : '';
+          meta.textContent = stamp ? `Updated ${stamp}` : '';
+
+          btn.appendChild(left);
+          btn.appendChild(meta);
+
+          btn.onclick = () => {
+            nameInput.value = n;
+            setSelected(n);
+          };
+          btn.ondblclick = () => {
+            nameInput.value = n;
+            setSelected(n);
+            if(mode === 'load') actionBtn.click();
+          };
+
+          list.appendChild(btn);
+        }
+      }
+
+      // typing filters the list in load mode; in save mode it chooses what will be overwritten/created
+      nameInput.oninput = () => {
+        if(mode === 'load') render(nameInput.value);
+        setSelected(nameInput.value);
+      };
+
+      render('');
+      setSelected(selected);
+
       actionBtn.onclick = () => {
-        const name = nameInput.value.trim();
+        const name = (nameInput.value || selected).trim();
         if(!name) return;
         const saves2 = getSaves();
+
         if(mode === 'save'){
-          saves2[name] = snapshot();
+          const payload = snapshot();
+          payload.updatedAt = Date.now();
+          saves2[name] = payload; // overwrite or create
           setSaves(saves2);
+          currentProjectName = name;
           showToast(`Saved: ${name}`);
         } else {
           if(!saves2[name]) return;
           pushHistory();
           loadState(saves2[name]);
+          currentProjectName = name;
           showToast(`Loaded: ${name}`);
         }
         modal.style.display = 'none';
@@ -835,15 +919,16 @@
         if(!confirm('Create a new project? Current build will be cleared.')) return;
         pushHistory();
         clearWorld();
-        modal.style.display = 'none';
+        currentProjectName = null;
         showToast('New project');
+        modal.style.display = 'none';
       };
 
-      document.getElementById('closeSave').onclick = () => {
-        modal.style.display = 'none';
-      };
+      closeBtn.onclick = () => { modal.style.display = 'none'; };
 
       modal.style.display = 'flex';
+      nameInput.focus();
+      nameInput.select();
     }
 
     saveBtn.onclick = () => openSaveLoadModal('save');
@@ -913,15 +998,17 @@
       renderer.setSize(innerWidth,innerHeight);
     });
   </script>
-  <div id="saveModal" style="display:none;position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:20;align-items:center;justify-content:center;">
-    <div style="background:rgba(15,18,28,0.95);border:1px solid rgba(255,255,255,0.15);border-radius:16px;padding:16px;width:320px;max-height:70vh;display:flex;flex-direction:column;color:#e8ecff;">
-      <h3 id="saveTitle" style="margin:0 0 10px;font-size:16px;">Save</h3>
-      <input id="saveName" placeholder="Name..." style="margin-bottom:8px;padding:8px;border-radius:10px;border:1px solid rgba(255,255,255,0.2);background:#0b0d12;color:#e8ecff;" />
-      <div id="saveList" style="flex:1;overflow:auto;margin-bottom:10px;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;"></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-        <button class="btn" id="newProject">New</button>
-        <button class="btn" id="saveAction">Save</button>
-        <button class="btn" id="closeSave">Close</button>
+    <div id="saveModal" class="modalOverlay">
+    <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="saveTitle">
+      <h3 id="saveTitle" class="modalTitle">Save</h3>
+      <p id="saveSub" class="modalSub"></p>
+      <input id="saveName" class="modalInput" placeholder="Project name…" />
+      <p id="selectedLine" class="selectedLine">Selected: (none)</p>
+      <div id="saveList" class="saveList"></div>
+      <div class="modalRow" style="justify-content:flex-end;flex-wrap:wrap;">
+        <button class="btn" id="newProject" type="button">New</button>
+        <button class="btn" id="saveAction" type="button" disabled>Save</button>
+        <button class="btn" id="closeSave" type="button">Close</button>
       </div>
     </div>
   </div>
